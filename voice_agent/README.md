@@ -72,6 +72,7 @@ Clone the repository and install dependencies into a virtual environment with [u
 git clone https://github.com/livekit-examples/agent-starter-python.git
 cd agent-starter-python
 uv sync
+uv run playwright install chromium
 ```
 
 Sign up for [LiveKit Cloud](https://cloud.livekit.io/), then copy `.env.example` to `.env.local` and fill it in. To have the CLI write your project's URL and API keys into the file instead, run:
@@ -82,6 +83,10 @@ lk app env --write --destination .env.local
 ```
 
 </details>
+
+The Playwright browser opens visibly during local development. Set
+`BROWSER_HEADLESS=true` in `.env.local` when running without a desktop display;
+the included Docker image sets this automatically.
 
 ## Run the agent
 

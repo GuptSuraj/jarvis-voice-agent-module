@@ -1,46 +1,67 @@
-import logging
+import os
 import textwrap
 
 from dotenv import load_dotenv
+from google.genai import types as genai_types
 from livekit.agents import (
     Agent,
     AgentServer,
     AgentSession,
     JobContext,
-    STTContextOptions,
     TurnHandlingOptions,
     cli,
     inference,
     room_io,
 )
+from livekit.agents.beta.tools import EndCallTool
 from livekit.plugins import ai_coustics, google
-from tools import search_web
 
-logger = logging.getLogger("agent")
+from browser import BrowserManager
+from tools import BrowserTools
 
 load_dotenv(".env.local")
 
 
+def _browser_headless() -> bool:
+    return os.getenv("BROWSER_HEADLESS", "false").strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
 class Assistant(Agent):
-    def __init__(self) -> None:
+    def __init__(self, browser: BrowserManager | None = None) -> None:
+        self.browser = browser or BrowserManager(headless=True)
+        self.browser_tools = BrowserTools(self.browser)
+        self._end_call_tool = EndCallTool(
+            extra_description=(
+                "Only end the call after the user clearly says they are finished, "
+                "says goodbye, or directly asks to end the call."
+            ),
+            end_instructions=(
+                "Give Jarvis's brief, polite British-English farewell, then end the call."
+            ),
+        )
         super().__init__(
             # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
             # See all available models at https://docs.livekit.io/agents/models/llm/
+            # llm=inference.LLM(model="google/gemma-4-31b-it"),
             llm=google.beta.realtime.RealtimeModel(
                 model="gemini-3.1-flash-live-preview",
                 voice="Enceladus",
                 language="en-GB",
-            ), 
-            tools=[search_web],
+                tool_response_scheduling=genai_types.FunctionResponseScheduling.WHEN_IDLE,
+            ),
             # To use a realtime model instead of a voice pipeline, replace the LLM
-            # with a realtime model and remove the STT/TTS from the AgentSession
-            # (Note: This is for OpenAI GPT-Live, the recommended speech-to-speech
-            # model. For other providers, see https://docs.livekit.io/agents/models/realtime/)
+            # with a RealtimeModel and remove the STT/TTS from the AgentSession
+            # (Note: This is for the OpenAI Realtime API. For other providers, see https://docs.livekit.io/agents/models/realtime/)
             # 1. Install livekit-agents[openai]
             # 2. Set OPENAI_API_KEY in .env.local
             # 3. Add `from livekit.plugins import openai` to the top of this file
             # 4. Replace the llm argument with:
-            #    llm=openai.realtime.GPTLiveModel(voice="marin"),
+            #     llm=openai.realtime.RealtimeModel(voice="marin")
             instructions=textwrap.dedent(
                 """\
                         You are Jarvis a helpful and sarcastic AI butler.
@@ -89,7 +110,8 @@ class Assistant(Agent):
                         - Always inspect_page before attempting to click or type, unless the target was returned by a previous inspection.
                         - Use the element names and roles returned by inspect_page as the targets for click and type_text.
                         - Before a consequential browser action such as sending, submitting, purchasing, deleting, or confirming, explain what will happen and ask for explicit confirmation.
-                        - Only call confirm_browser_action after the user has clearly confirmed the exact action.
+                        - When click or type_text returns confirmation_required, explain the exact action and ask the user to confirm it.
+                        - After the user clearly confirms, retry the exact same action with confirmed set to true.
                         - Collect required inputs first. Perform actions silently if the runtime expects it.
 
                         # Special Requests
@@ -102,30 +124,17 @@ class Assistant(Agent):
                         - Protect privacy and minimize sensitive data.
                         """
             ),
+            tools=[
+                *self.browser_tools.tools,
+                *self._end_call_tool.tools,
+            ],
         )
-
-    # To add tools, use the @function_tool decorator.
-    # Here's an example that adds a simple weather tool.
-    # You also have to add `from livekit.agents import function_tool, RunContext` to the top of this file
-    # @function_tool
-    # async def lookup_weather(self, context: RunContext, location: str):
-    #     """Use this tool to look up current weather information in the given location.
-    #
-    #     If the location is not supported by the weather service, the tool will indicate this. You must tell the user the location's weather is unavailable.
-    #
-    #     Args:
-    #         location: The location to look up weather information for (e.g. city name)
-    #     """
-    #
-    #     logger.info(f"Looking up weather for {location}")
-    #
-    #     return "sunny with a temperature of 70 degrees."
 
 
 server = AgentServer()
 
 
-@server.rtc_session(agent_name="voice_agent")
+@server.rtc_session(agent_name="my-agent")
 async def my_agent(ctx: JobContext):
     # Logging setup
     # Add any other context you want in all log entries here
@@ -133,17 +142,19 @@ async def my_agent(ctx: JobContext):
         "room": ctx.room.name,
     }
 
-    # Set up a voice AI pipeline using AssemblyAI, Fish Audio, and the LiveKit turn detector
+    browser = BrowserManager(headless=_browser_headless())
+    ctx.add_shutdown_callback(browser.close)
+
+    # Gemini realtime handles the voice input and output for this session.
     session = AgentSession(
         # Speech-to-text (STT) is your agent's ears, turning the user's speech into text that the LLM can understand
         # See all available models at https://docs.livekit.io/agents/models/stt/
-        # Keyterms bias the STT toward distinctive words it would otherwise misspell.
-        # List your own names, brands, and jargon in `keyterms`. Detection additionally
-        # extracts terms from the live conversation, such as a caller's name, and applies
-        # them once the transcript corroborates the spelling.
-        # See more at https://docs.livekit.io/agents/models/stt/keyterms/
+        # stt=inference.STT(model="deepgram/nova-3", language="en"),
         # Text-to-speech (TTS) is your agent's voice, turning the LLM's text into speech that the user can hear
         # See all available models as well as voice selections at https://docs.livekit.io/agents/models/tts/
+        # tts=inference.TTS(
+        #   model="fishaudio/s2.1-pro", voice="fa4c9eb3dccc4806b382b40d61c6b10a"
+        # ),
         turn_handling=TurnHandlingOptions(
             # The LiveKit turn detector determines when the user is done speaking and the agent should respond.
             # TurnDetector is an end-of-turn model that listens to the user's audio directly, combining
@@ -162,12 +173,12 @@ async def my_agent(ctx: JobContext):
         # emits inline delivery tags (emotion, pacing, non-verbal sounds) that the TTS renders and
         # the transcript never shows. Requires a TTS model that supports markup, such as the Fish
         # Audio model above.
-        expressive=True,
+        # expressive=True,
     )
 
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
-        agent=Assistant(),
+        agent=Assistant(browser),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             video_input=True,
@@ -178,17 +189,6 @@ async def my_agent(ctx: JobContext):
             ),
         ),
     )
-
-    # # Add a virtual avatar to the session, if desired
-    # # For other providers, see https://docs.livekit.io/agents/models/avatar/
-    # avatar = anam.AvatarSession(
-    #     persona_config=anam.PersonaConfig(
-    #         name="...",
-    #         avatarId="...",  # See https://docs.livekit.io/agents/models/avatar/plugins/anam
-    #     ),
-    # )
-    # # Start the avatar and wait for it to join
-    # await avatar.start(session, room=ctx.room)
 
     # Join the room and connect to the user
     await ctx.connect()

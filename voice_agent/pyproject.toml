@@ -13,6 +13,7 @@ dependencies = [
     "langchain-community>=0.4.2",
     "livekit-agents[google,images]~=1.8",
     "livekit-plugins-ai-coustics~=0.3",
+    "playwright>=1.55,<2",
     "python-dotenv",
 ]
 

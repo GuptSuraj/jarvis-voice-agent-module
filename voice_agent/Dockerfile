@@ -19,6 +19,9 @@ ENV UV_COMPILE_BYTECODE=1
 ENV HF_HOME=/app/.cache/huggingface
 ENV TORCH_HOME=/app/.cache/torch
 
+# Keep the Playwright browser inside /app so it is copied into production.
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.cache/ms-playwright
+
 # --- Build stage ---
 # Install dependencies, build native extensions, and prepare the application
 FROM base AS build
@@ -54,6 +57,9 @@ RUN uv sync --locked
 # loading your agent code.
 RUN uv run --module livekit.agents download-files
 
+# Download Chromium while dependencies are available in the build stage.
+RUN uv run playwright install chromium
+
 # Copy all remaining application files into the container
 # This includes source code, configuration files, and dependency specifications
 # (Excludes files specified in .dockerignore)
@@ -79,6 +85,12 @@ RUN adduser \
 COPY --from=build --chown=appuser:appuser /app /app
 
 WORKDIR /app
+
+# Install Chromium's shared-library dependencies in the runtime image.
+RUN uv run playwright install-deps chromium
+
+# Hosted workers do not have a desktop display.
+ENV BROWSER_HEADLESS=true
 
 # Switch to the non-privileged user for all subsequent operations
 # This improves security by not running as root
